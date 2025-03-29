@@ -1,0 +1,144 @@
+# Install required packages (Run once)
+install.packages(c("tidyverse", "pROC", "caret", "randomForest", "class", "ggcorrplot", "ucimlrepo"))
+
+# Load Libraries
+library(tidyverse)
+library(pROC)
+library(caret)
+library(randomForest)
+library(class)
+library(ggcorrplot)
+library(ucimlrepo)
+
+# ---- Load Data ----
+# Fetch dataset from UCI repository
+wine_quality <- fetch_ucirepo(id = 186)
+
+# Load red and white wine datasets
+red_wine <- read.csv("winequality-red.csv", sep = ";")
+white_wine <- read.csv("winequality-white.csv", sep = ";")
+
+# Add a column to differentiate red and white wines
+red_wine$type <- "Red"
+white_wine$type <- "White"
+
+# Combine datasets
+combined_wine <- bind_rows(red_wine, white_wine)
+
+# ---- Data Cleaning ----
+# Check for missing values
+sum(is.na(combined_wine))
+
+# Fill missing values with median
+combined_wine <- combined_wine %>%
+  mutate(across(where(is.numeric), ~ replace_na(., median(., na.rm = TRUE))))
+
+# Remove duplicate rows
+combined_wine <- combined_wine %>% distinct()
+
+# Remove outliers using IQR method
+Q1 <- combined_wine %>% summarise(across(where(is.numeric), ~ quantile(., 0.25, na.rm = TRUE)))
+Q3 <- combined_wine %>% summarise(across(where(is.numeric), ~ quantile(., 0.75, na.rm = TRUE)))
+IQR_values <- Q3 - Q1
+
+combined_wine <- combined_wine %>%
+  filter(across(where(is.numeric), 
+                ~ . >= Q1[[cur_column()]] - 1.5 * IQR_values[[cur_column()]] & 
+                     . <= Q3[[cur_column()]] + 1.5 * IQR_values[[cur_column()]]))
+
+# Normalize numeric columns using Min-Max Scaling
+normalize <- function(x) { (x - min(x)) / (max(x) - min(x)) }
+combined_wine <- combined_wine %>%
+  mutate(across(where(is.numeric), normalize))
+
+# ---- Correlation Matrix ----
+cor_matrix <- cor(combined_wine %>% select(-type))
+ggcorrplot(cor_matrix, method = "circle", title = "Correlation Matrix")
+
+# ---- Exploratory Data Analysis ----
+# Histogram of Alcohol content for red and white wine
+ggplot(combined_wine, aes(x = alcohol, fill = type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  labs(title = "Histogram of Alcohol Content", x = "Alcohol", y = "Count")
+
+# Histogram of Density for both wines
+ggplot(combined_wine, aes(x = density, fill = type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  labs(title = "Histogram of Density", x = "Density", y = "Count")
+
+# Histogram of pH for both wines
+ggplot(combined_wine, aes(x = pH, fill = type)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 30) +
+  labs(title = "Histogram of pH", x = "pH", y = "Count")
+
+# Bar plot of Quality Distribution
+ggplot(combined_wine, aes(x = factor(quality), fill = type)) +
+  geom_bar() +
+  labs(title = "Quality Distribution", x = "Quality Score", y = "Count")
+
+# ---- Regression Models ----
+# Linear Regression
+lm_model <- lm(quality ~ alcohol, data = combined_wine)
+summary(lm_model)
+
+# Multiple Linear Regression
+multiple_lm <- lm(quality ~ alcohol + pH + sulphates, data = combined_wine)
+summary(multiple_lm)
+
+# Residual plot
+ggplot(combined_wine, aes(x = multiple_lm$fitted.values, y = multiple_lm$residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  labs(title = "Residuals vs Fitted for Multiple Regression", x = "Fitted Values", y = "Residuals")
+
+# ---- Classification Models ----
+# Convert quality to a binary classification (0 = low, 1 = high)
+combined_wine$high_quality <- ifelse(combined_wine$quality > 5, 1, 0)
+
+# Logistic Regression
+logistic_model <- glm(high_quality ~ alcohol + pH + sulphates, family = binomial(), data = combined_wine)
+summary(logistic_model)
+
+# Random Forest Model
+set.seed(123)
+rf_model <- randomForest(high_quality ~ alcohol + pH + sulphates, data = combined_wine, ntree = 100)
+print(rf_model)
+
+# K-Nearest Neighbors (KNN)
+set.seed(123)
+train_idx <- sample(seq_len(nrow(combined_wine)), size = 0.7 * nrow(combined_wine))
+train_data <- combined_wine[train_idx, ]
+test_data <- combined_wine[-train_idx, ]
+
+train_labels <- train_data$high_quality
+test_labels <- test_data$high_quality
+
+knn_model <- knn(train = train_data[, c("alcohol", "pH", "sulphates")], 
+                 test = test_data[, c("alcohol", "pH", "sulphates")], 
+                 cl = train_labels, k = 5)
+
+# Confusion Matrix for KNN
+confusionMatrix(as.factor(knn_model), as.factor(test_labels))
+
+# ---- Model Evaluation ----
+# Predict probabilities for Logistic Regression
+prob_logistic <- predict(logistic_model, type = "response")
+roc_logistic <- roc(combined_wine$high_quality, prob_logistic)
+
+# Predict probabilities for Random Forest
+prob_rf <- predict(rf_model, type = "prob")[,2]
+roc_rf <- roc(combined_wine$high_quality, prob_rf)
+
+# ROC Curve Comparison
+plot(roc_logistic, col = "blue", main = "ROC Curve Comparison")
+lines(roc_rf, col = "red")
+legend("bottomright", legend = c("Logistic Regression", "Random Forest"), col = c("blue", "red"), lwd = 2)
+
+# ---- Feature Importance ----
+importance <- importance(rf_model)
+varImpPlot(rf_model, main = "Variable Importance (Random Forest)")
+
+# ---- Save Cleaned Data ----
+write.csv(combined_wine, "processed_wine_data.csv", row.names = FALSE)
+
+# End of script
